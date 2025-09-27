@@ -1,0 +1,66 @@
+{
+  "timestamp": "20250806_090949",
+  "calibration_points": {
+    "top_left_xy": [
+      320,
+      70
+    ],
+    "top_right_xy": [
+      960,
+      70
+    ],
+    "mid_left_xy": [
+      330,
+      320
+    ],
+    "mid_center_xy": [
+      640,
+      320
+    ],
+    "mid_right_xy": [
+      950,
+      320
+    ],
+    "bottom_left_xy": [
+      340,
+      580
+    ],
+    "bottom_center_xy": [
+      640,
+      580
+    ],
+    "bottom_right_xy": [
+      940,
+      580
+    ],
+    "circle_20_1_xy": [
+      480,
+      180
+    ],
+    "circle_20_2_xy": [
+      800,
+      180
+    ],
+    "circle_30_xy": [
+      640,
+      450
+    ],
+    "circle_50_1_xy": [
+      450,
+      450
+    ],
+    "circle_50_2_xy": [
+      830,
+      450
+    ]
+  },
+  "circle_radii": {
+    "circle_20": 55,
+    "circle_30": 58,
+    "circle_50": 53
+  },
+  "image_size": [
+    720,
+    1280
+  ]
+}

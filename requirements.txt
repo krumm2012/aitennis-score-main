@@ -1,0 +1,18 @@
+# AI Tennis Score System Dependencies
+
+# Core computer vision
+opencv-python>=4.5.0
+numpy>=1.20.0
+
+# Network communication
+requests>=2.25.0
+pyzmq>=22.0.0
+
+# System libraries (install via package manager)
+# Ubuntu/Debian: sudo apt-get install python3-gi gstreamer1.0-tools gstreamer1.0-plugins-*
+# CentOS/RHEL: sudo yum install python3-gobject gstreamer1-tools gstreamer1-plugins-*
+
+# Optional dependencies for enhanced functionality
+# Pillow>=8.0.0          # For advanced image processing
+# matplotlib>=3.3.0      # For data visualization
+# psutil>=5.8.0          # For system monitoring
