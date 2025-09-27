@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from config.config import ConfigLoader
+from impact_detector import ImpactDetector
 import gi
 
 gi.require_version('Gst', '1.0')
@@ -47,6 +48,14 @@ class TennisStreamProcessor:
         self.loop = GLib.MainLoop()
         self.cap = None
         self.running = True
+        
+        # 初始化撞击检测器
+        self.impact_detector = ImpactDetector(configure)
+        
+        # 撞击检测相关状态
+        self.last_ball_position = None
+        self.ball_detected_frames = 0
+        self.impact_detection_enabled = True
 
     # 消息处理线程
     def zmq_message_handler(self):
@@ -84,6 +93,11 @@ class TennisStreamProcessor:
                 self.interval = int(message.split(' ')[5])
 
                 self.recognized = False
+                # 重置撞击检测器状态，准备检测新球
+                self.impact_detector.reset()
+                self.last_ball_position = None
+                self.ball_detected_frames = 0
+                
                 self.logger.info(f"Received ball: {self.game_id} {self.ball_number} {self.light} {self.serve_time} {self.interval}")
 
     def bus_call(self, bus, message, loop):
@@ -191,6 +205,20 @@ class TennisStreamProcessor:
         self.loop.quit()
         self.stop_pipeline()
         cv2.destroyAllWindows()
+    
+    def get_impact_detection_stats(self):
+        """获取撞击检测统计信息"""
+        return self.impact_detector.get_detection_stats()
+    
+    def set_impact_detection_enabled(self, enabled: bool):
+        """启用或禁用撞击检测"""
+        self.impact_detection_enabled = enabled
+        self.logger.info(f"Impact detection {'enabled' if enabled else 'disabled'}")
+    
+    def update_impact_detection_params(self, params: dict):
+        """更新撞击检测参数"""
+        self.impact_detector.params.update(params)
+        self.logger.info(f"Impact detection parameters updated: {params}")
 
     # 返回计分程序采集数据
     def call_score_api(self, score, coord, x3, ball_speed, game_type, light):
@@ -232,6 +260,9 @@ class TennisStreamProcessor:
         # 寻找轮廓
         contours, _ = cv2.findContours(blurred.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+        ball_detected = False
+        current_ball_position = None
+
         for cnt in contours:
             area = cv2.contourArea(cnt)
             if area > self.config.min_girth:  # 轮廓周长，排除小的干扰
@@ -242,37 +273,79 @@ class TennisStreamProcessor:
                 (x, y), radius = cv2.minEnclosingCircle(cnt)
                 center = (int(x), int(y + self.config.y_offset))
 
-                if circularity > config.circularity and is_point_in_polygon(center, trapezoid):
-                    score, score_light = self.get_score(x, y)
-                    self.logger.info(f"light{self.light},score{score}, score_light{score_light}")
-                    x3 = False
-                    if int(self.light) == score_light:
-                        score = score * self.config.multiple
-                        x3 = True
+                if circularity > self.config.circularity and is_point_in_polygon(center, trapezoid):
+                    ball_detected = True
+                    current_ball_position = (x, y)
+                    self.ball_detected_frames += 1
+                    
+                    # 使用优化的撞击检测
+                    impact_result = None
+                    if self.impact_detection_enabled:
+                        curtain_region = np.array([[self.config.top_left_xy, self.config.top_right_xy, 
+                                                  self.config.bottom_right_xy, self.config.bottom_left_xy]], 
+                                                dtype=np.int32)
+                        impact_result = self.impact_detector.detect_impact(frame, current_ball_position, curtain_region)
+                    
+                    # 判断是否应该处理这次检测
+                    should_process = True
+                    if self.impact_detection_enabled and impact_result:
+                        # 只有在检测到撞击时才处理
+                        should_process = impact_result['detected']
+                        if impact_result['detected']:
+                            self.logger.info(f"撞击检测: {impact_result['reason']} 置信度: {impact_result['confidence']:.2f}")
+                    
+                    if should_process:
+                        score, score_light = self.get_score(x, y)
+                        self.logger.info(f"light{self.light},score{score}, score_light{score_light}")
+                        x3 = False
+                        if int(self.light) == score_light:
+                            score = score * self.config.multiple
+                            x3 = True
 
-                    # 球速计算km/h： 3.6 * 球场长度/(当前时间s-发球指令时间s-发球机寻位时间s-球飞行时间s)
-                    flight_time = config.court_length / (config.serve_speed * 1000 / 3600)
-                    time1 = time.time()
+                        # 球速计算km/h： 3.6 * 球场长度/(当前时间s-发球指令时间s-发球机寻位时间s-球飞行时间s)
+                        flight_time = self.config.court_length / (self.config.serve_speed * 1000 / 3600)
+                        time1 = time.time()
 
-                    ball_speed = 3.6 * (config.court_length + config.court_length_tuneup) / (
-                            time1 - float(self.serve_time) - config.locating_time / 1000 - flight_time - config.swing_time / 1000)
-                    if ball_speed < 0:
-                        ball_speed = 25
+                        ball_speed = 3.6 * (self.config.court_length + self.config.court_length_tuneup) / (
+                                time1 - float(self.serve_time) - self.config.locating_time / 1000 - flight_time - self.config.swing_time / 1000)
+                        if ball_speed < 0:
+                            ball_speed = 25
 
-                    self.logger.info(f"计算球速: {ball_speed} 发球时间: {self.serve_time} 总时长: {time1 - float(self.serve_time)} 发球机寻位时间: {config.locating_time} 球飞行时间: {flight_time}")
+                        self.logger.info(f"计算球速: {ball_speed} 发球时间: {self.serve_time} 总时长: {time1 - float(self.serve_time)} 发球机寻位时间: {self.config.locating_time} 球飞行时间: {flight_time}")
 
-                    self.call_score_api(score, str(center), x3, math.ceil(ball_speed), self.game_type, score_light)
-                    self.logger.info(f"帧: {self.frame_count} 坐标: {center} 半径: {radius} 得分: {score} 游戏类型: {self.game_type} 打中灯号: {score_light}")
-                    # self.logger.info("帧:", self.frame_count, "坐标:", str(center), "半径:", radius, "得分:", score, "游戏类型:", self.game_type, "打中灯号:", score_light)
+                        self.call_score_api(score, str(center), x3, math.ceil(ball_speed), self.game_type, score_light)
+                        
+                        impact_info = ""
+                        if impact_result and impact_result['detected']:
+                            impact_info = f" [撞击检测: {impact_result['method']}]"
+                        
+                        self.logger.info(f"帧: {self.frame_count} 坐标: {center} 半径: {radius} 得分: {score} 游戏类型: {self.game_type} 打中灯号: {score_light}{impact_info}")
 
-                    if self.config.save_image:
-                        cv2.putText(frame, str(center) + str(score), (int(x) - 100, int(y) - 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                        cv2.circle(frame, center, int(radius), (0, 0, 255), 2)
+                        if self.config.save_image:
+                            # 绘制撞击检测信息
+                            if impact_result and impact_result['detected']:
+                                cv2.putText(frame, f"IMPACT: {impact_result['confidence']:.2f}", 
+                                          (int(x) - 100, int(y) - 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                            
+                            cv2.putText(frame, str(center) + str(score), (int(x) - 100, int(y) - 20), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                            cv2.circle(frame, center, int(radius), (0, 0, 255), 2)
 
-                        save_image(frame, f"images/{self.game_id}/ok_{self.ball_number}.jpg")
+                            save_image(frame, f"images/{self.game_id}/ok_{self.ball_number}.jpg")
 
-                    # 识别到球
-                    self.recognized = True
+                        # 识别到球
+                        self.recognized = True
+                        break  # 只处理第一个检测到的球
+
+        # 更新球的位置信息
+        if ball_detected:
+            self.last_ball_position = current_ball_position
+        else:
+            # 如果连续多帧没有检测到球，重置撞击检测器
+            if self.ball_detected_frames > 0:
+                self.ball_detected_frames = max(0, self.ball_detected_frames - 1)
+                if self.ball_detected_frames == 0:
+                    self.impact_detector.reset()
+                    self.last_ball_position = None
 
         return frame
 
